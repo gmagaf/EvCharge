@@ -1,19 +1,30 @@
 # Back-end
 
+[Spring initializr](https://start.spring.io/): Spring Boot 2.4.3
+
 Java 11
 
-gradle 6.8
+Gradle 6.8
 
-## Database
+### Database
 
-Mongodb
+MongoDB 4.4
 
+## Περιεχόμενα
 
-Ενδεικτικά περιεχόμενα:
-
-- Πηγαίος κώδικας εφαρμογής για εισαγωγή, διαχείριση και
-  πρόσβαση σε δεδομένα (backend).
-- Database dump (sql ή json)
-- Back-end functional tests.
-- Back-end unit tests.
-- RESTful API.
+- Πηγαίος κώδικας εφαρμογής και RESTful API (**evcharge/src/main**)
+  * Χρήσιμες εντολές στον φάκελο **evcharge**:
+    ```sh
+    ./gradlew build
+    ```
+    ```sh
+    ./gradlew bootrun
+    ```
+    ```sh
+    ./gradlew clean
+    ```
+    ```sh
+    ./gradlew test
+    ```
+- Database dump (**dump**)
+- Back-end tests (**evcharge/src/test**)

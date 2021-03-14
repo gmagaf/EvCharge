@@ -9,7 +9,7 @@ import lombok.Getter;
 public class PointInfoResponse extends MyAbstractObj {
     private Map<String, String> fields_messages = new HashMap<String, String>();
 
-    public PointInfoResponse(HashMap map){
+    public PointInfoResponse(HashMap<String, String> map){
         this.fields_messages = map;
     }
 
@@ -30,7 +30,9 @@ public class PointInfoResponse extends MyAbstractObj {
     public String toJson() {
       String out = "";
       for (String s : fields_messages.keySet())
-        out += "\"" + s + "\": \"" + fields_messages.get(s) + "\", ";
+        if (fields_messages.get(s).charAt(0) == '[' || s.equals("cost"))
+          out += "\"" + s + "\": " + fields_messages.get(s) + ", ";
+        else out += "\"" + s + "\": \"" + fields_messages.get(s) + "\", ";
       out = out.substring(0, out.length() - 2);
       return "{" + out + "}";
     }

@@ -14,12 +14,19 @@ import java.nio.charset.Charset;
 import java.text.SimpleDateFormat;
 import java.util.HashSet;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Set;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
 import java.time.format.DateTimeFormatter;
 import java.time.LocalDateTime;
+import java.time.temporal.TemporalAccessor;
+import java.time.temporal.ChronoUnit;
+import static java.time.temporal.ChronoUnit.SECONDS;
+import java.math.RoundingMode;
+import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 
 import org.killercarrots.evcharge.repos.ChargeEventsRepository;
 import org.killercarrots.evcharge.repos.RoleRepository;
@@ -42,6 +49,16 @@ import org.springframework.security.core.Authentication;
 
 import org.killercarrots.evcharge.errorHandling.*;
 import org.killercarrots.evcharge.models.*;
+
+//K
+import static spark.Spark.get;
+import static spark.Spark.post;
+import static spark.Spark.port;
+import static spark.Spark.staticFiles;
+//import com.google.gson.Gson;
+import com.stripe.Stripe;
+import com.stripe.model.checkout.Session;
+import com.stripe.param.checkout.SessionCreateParams;
 
 // Spring boot seems to not register both controllers
 // so we set this one to RestController as a workaround
@@ -124,29 +141,10 @@ public class GeneralController {
     return false;
   }
 
-  // just some demo endpoints to check
-  // role based authorization
+  // just a demo endpoint for checking
   @GetMapping("/evcharge/test")
   public String allAccess() {
     return "Public Content.";
-  }
-
-  @GetMapping("/evcharge/user")
-  @PreAuthorize("hasRole('USER') or hasRole('OPERATOR') or hasRole('ADMIN')")
-  public String userAccess() {
-    return "User Content.";
-  }
-
-  @GetMapping("/evcharge/operator")
-  @PreAuthorize("hasRole('OPERATOR')")
-  public String moderatorAccess() {
-    return "Moderator Board.";
-  }
-
-  @GetMapping("/evcharge/admin")
-  @PreAuthorize("hasRole('ADMIN')")
-  public String adminAccess() {
-    return "Admin Board.";
   }
 
   @GetMapping(value="/evcharge/api/admin/users/{username}")
@@ -277,6 +275,9 @@ public class GeneralController {
 		return buildResponse(new MessageResponse("OK", "status"), "json");
 	}
 
+
+  // Implementing use case 3: statistics
+
   // Get sessions in a specified period of time for a given pointID
   @GetMapping(value="/evcharge/api/SessionsPerPoint/{pointId}/{fromDate}/{toDate}")
 	@PreAuthorize("hasRole('ADMIN') or hasRole('OPERATOR')")
@@ -351,6 +352,7 @@ public class GeneralController {
 		body.buildList(events);
 		return buildResponse(body, format);
 	}
+
 
   // Implementing use case 1: start charging event
 
@@ -439,7 +441,7 @@ public class GeneralController {
 
     ActiveSession activeSession = new ActiveSession();
     // get system time, needed later
-    DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss");
+    DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     LocalDateTime now = LocalDateTime.now();
     // There is no automatic way of setting unique id in mongodb with java and spring
     // Also no available tutorial was found without using maven dependencies, which we do not use
@@ -449,7 +451,7 @@ public class GeneralController {
     // In short, this is not a sufficient solution for a real system
     activeSession.setId(arrOfStr[0]+"_"+arrOfStr[1]+"_"+dtf.format(now));
     activeSession.setStationId(arrOfStr[0]);
-    activeSession.setPointId(arrOfStr[1]);
+    activeSession.setPointId(station_point);
     activeSession.setVehicleId(vehicleId);
     activeSession.setOperator(station.getOperator());
     activeSession.setStartTime(dtf.format(now));
@@ -458,6 +460,14 @@ public class GeneralController {
     activeSession.setUser(username);
     activeSession.setProtocol(protocol);
     double kWhRequested = Double.parseDouble(cost) / station.getCost();
+    DecimalFormat df = new DecimalFormat("0.00");
+
+    DecimalFormatSymbols dfs = new DecimalFormatSymbols();
+    dfs.setDecimalSeparator('.');
+    df.setDecimalFormatSymbols(dfs);
+
+    df.setRoundingMode(RoundingMode.DOWN);
+    kWhRequested = Double.parseDouble(df.format(kWhRequested));
     // get vehicle's battery size, if requested amount exceeds battery size adjust request to battery size amount
     String message = "";
     if (kWhRequested > vehicle.getBatterySize()) {
@@ -474,7 +484,10 @@ public class GeneralController {
     catch (Exception e) {
 			return buildResponse(new MessageResponse("Failed to start session", "status"), format);
     }
-    return buildResponse(new MessageResponse(message+"Charging session started succesfully!", "status"), format);
+    HashMap<String, String> fields_messages = new HashMap<String, String>();
+    fields_messages.put("session", arrOfStr[0]+"_"+arrOfStr[1]+"_"+dtf.format(now));
+    fields_messages.put("status", message+"Charging session started successfully!");
+    return buildResponse(new PointInfoResponse(fields_messages), format);
   }
 
   // Charging starts with amount given as goal
@@ -515,17 +528,11 @@ public class GeneralController {
 
     ActiveSession activeSession = new ActiveSession();
     // get system time, needed later
-    DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy/MM/dd HH:mm:ss");
+    DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     LocalDateTime now = LocalDateTime.now();
-    // There is no automatic way of setting unique id in mongodb with java and spring
-    // Also no available tutorial was found without using maven dependencies, which we do not use
-    // As a workaround, id is generated by concatenating stationId-pointId-startTime,
-    // supposing it's not possible to start more than one session in the same second,
-    // which in turn means that host system of API must never lose synchronization with universal time
-    // In short, this is not a sufficient solution for a real system
     activeSession.setId(arrOfStr[0]+"_"+arrOfStr[1]+"_"+dtf.format(now));
     activeSession.setStationId(arrOfStr[0]);
-    activeSession.setPointId(arrOfStr[1]);
+    activeSession.setPointId(station_point);
     activeSession.setVehicleId(vehicleId);
     activeSession.setOperator(station.getOperator());
     activeSession.setStartTime(dtf.format(now));
@@ -550,16 +557,141 @@ public class GeneralController {
     catch (Exception e) {
 			return buildResponse(new MessageResponse("Failed to start session", "status"), format);
     }
-    return buildResponse(new MessageResponse(message+"Charging session started succesfully!", "status"), format);
+    HashMap<String, String> fields_messages = new HashMap<String, String>();
+    fields_messages.put("session", arrOfStr[0]+"_"+arrOfStr[1]+"_"+dtf.format(now));
+    fields_messages.put("status", message+"Charging session started successfully!");
+    return buildResponse(new PointInfoResponse(fields_messages), format);
   }
 
-  // Search for nearby stations
-  @GetMapping(value="/evcharge/api/StationsNearby/{lat}/{lon}/{radius}")
+
+  // Implementing use case 2: complete charging event
+
+  // User requests his/her active sessions
+  @GetMapping("/evcharge/api/ActiveSession")
   @PreAuthorize("hasRole('USER') or hasRole('OPERATOR') or hasRole('ADMIN')")
+  public ResponseEntity<String> userActiveSessions(Authentication auth,
+  @RequestParam(value = "format", defaultValue = "json") String format) throws NoDataException {
+
+    String username = auth.getName();
+    HashSet<ActiveSession> sessions = activeSessionRepository.findByUser(username);
+    if(sessions.size() == 0) {
+      throw new NoDataException("No active sessions for user: "+username);
+    }
+
+    // collect all active sessions of user in a Hashmap(sessionId, currentCost)
+    HashMap<String, Double> map = new HashMap<>();
+    DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    for (ActiveSession s : sessions) {
+      Station station = stationRepository.findById(s.getStationId()).get();
+      Point point = new Point();
+      Set<Point> points = station.getPoints();
+      for (Point p : points)
+        if (Integer.toString(p.getLocalId()).equals(s.getPointId().split("_")[1]))
+          point = p;
+      // calculate current chargine time
+      LocalDateTime now = LocalDateTime.now();
+      long diff = ChronoUnit.SECONDS.between(LocalDateTime.parse(s.getStartTime(), dtf), now);
+      // calculate current cost
+      double currentCost = (diff/3600.0)*point.getPower()*s.getCostPerKWh();
+      // if requested amount reached, stop inreasing cost
+      if (currentCost / station.getCost() > s.getKWhRequested())
+        currentCost = station.getCost() * s.getKWhRequested();
+      DecimalFormat df = new DecimalFormat("0.00");
+      //K
+      DecimalFormatSymbols dfs = new DecimalFormatSymbols();
+      dfs.setDecimalSeparator('.');
+      df.setDecimalFormatSymbols(dfs);
+
+      currentCost = Double.parseDouble(df.format(currentCost));
+      // put to map
+      map.put(s.getId(), currentCost);
+    }
+
+    return buildResponse(new ActiveSessionsResponse(map), format);
+  }
+
+  // complete charging process
+  @PostMapping("/evcharge/api/CheckOut/{sessionId}")
+  @PreAuthorize("hasRole('USER') or hasRole('OPERATOR') or hasRole('ADMIN')")
+  public ResponseEntity<String> completeCharging(Authentication auth,
+  // below we need a string that the user is NEVER going to enter
+  @RequestParam(value = "end", defaultValue = "electric vehicles suck, vescoukis-nickie not good professors (obvious lies)") String end,
+  @RequestParam(value = "format", defaultValue = "json") String format,
+  @PathVariable(value = "sessionId") String sessionId) throws BadRequestException {
+
+    ActiveSession activeSession = activeSessionRepository.findById(sessionId)
+        .orElseThrow(() -> new BadRequestException("No such active charging session"));
+    ActiveSession session = activeSessionRepository.findById(sessionId).get();
+    String username = auth.getName();
+    if (!session.getUser().equals(username))
+      throw new BadRequestException("Only the user who started this charging session can complete it");
+    DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+    LocalDateTime now = LocalDateTime.now();
+    if (end.equals("electric vehicles suck, vescoukis-nickie not good professors (obvious lies)"))
+      end = dtf.format(now);
+    else {
+      // check if date-time is valid
+      try {
+        TemporalAccessor temporal = dtf.parse(end);
+      }
+      catch (Exception e) {
+        throw new BadRequestException("Invalid date-time format given");
+      }
+    }
+
+    ChargeEvent chargeEvent = new ChargeEvent();
+    chargeEvent.setEventId(sessionId);
+    chargeEvent.setStationId(session.getStationId());
+    chargeEvent.setPointId(session.getPointId());
+    chargeEvent.setVehicleId(session.getVehicleId());
+    chargeEvent.setOperator(session.getOperator());
+    chargeEvent.setStartTime(session.getStartTime());
+    chargeEvent.setEndTime(end);
+    chargeEvent.setUser(session.getUser());
+    chargeEvent.setProtocol(session.getProtocol());
+    chargeEvent.setCostPerKWh(session.getCostPerKWh());
+    // note that user may check out prematurely, so can't suppose kWhDelivered = kWhRequested
+    long diff = ChronoUnit.SECONDS.between(LocalDateTime.parse(session.getStartTime(), dtf), LocalDateTime.parse(end, dtf));
+    Station station = stationRepository.findById(session.getStationId()).get();
+    Point point = new Point();
+    Set<Point> points = station.getPoints();
+    for (Point p : points)
+      if (Integer.toString(p.getLocalId()).equals(session.getPointId().split("_")[1]))
+        point = p;
+    double kWhDelivered = (diff / 3600.0) * point.getPower();
+    if (kWhDelivered > vehicleRepository.findById(session.getVehicleId()).get().getBatterySize())
+      kWhDelivered = vehicleRepository.findById(session.getVehicleId()).get().getBatterySize();
+    double sessionCost = kWhDelivered * session.getCostPerKWh();
+    DecimalFormat df = new DecimalFormat("0.00");
+    //K
+    DecimalFormatSymbols dfs = new DecimalFormatSymbols();
+    dfs.setDecimalSeparator('.');
+    df.setDecimalFormatSymbols(dfs);
+
+    kWhDelivered = Double.parseDouble(df.format(kWhDelivered));
+    sessionCost = Double.parseDouble(df.format(sessionCost));
+    chargeEvent.setKWhDelivered(kWhDelivered);
+    chargeEvent.setSessionCost(sessionCost);
+    // add charge event to database and return response
+    try {
+      activeSessionRepository.delete(activeSession);
+      chargeEventsRepository.save(chargeEvent);
+    }
+    catch (Exception e) {
+      return buildResponse(new MessageResponse("Failed to close charging session", "status"), format);
+    }
+
+    return buildResponse(new MessageResponse(
+        "Charging completed successfully! Total cost is "+Double.toString(sessionCost)+"€", "status"), format);
+  }
+
+
+  // Implementing use case 4: search for nearby station
+  @GetMapping(value="/evcharge/api/StationsNearby/{lat}/{lon}/{radius}")
   public ResponseEntity<String> SearchStationsNearby(
   @RequestParam(value = "format", defaultValue = "json") String format,
-	@PathVariable(value = "lat") double lat,
 	@PathVariable(value = "lon") double lon,
+  @PathVariable(value = "lat") double lat,
   @PathVariable(value = "radius") int radius) throws BadRequestException, NoDataException {
     if(lat > 90 || lat < -90 || lon > 180 || lon < -180) {
       throw new BadRequestException("Invalid coordinates");
@@ -572,6 +704,180 @@ public class GeneralController {
     NearbyStationsResponse body = new NearbyStationsResponse(lat, lon, radius);
     body.buildList(ls);
     return buildResponse(body, format);
+  }
+
+
+  // Implementing use case 5: management of stations by operators
+
+  // show stations of operator
+  @GetMapping(value="/evcharge/api/Operator/StationShow/{operator}")
+  @PreAuthorize("hasRole('OPERATOR') or hasRole('ADMIN')")
+  public ResponseEntity<String> showStations(
+  @RequestParam(value = "format", defaultValue = "json") String format,
+	@PathVariable(value = "operator") String operator) throws BadRequestException, NoDataException {
+
+    User user = userRepository.findByUsername(operator)
+        .orElseThrow(() -> new BadRequestException("No such user"));
+    user = userRepository.findByUsername(operator).get();
+    Set<Role> roles = user.getRoles();
+    HashSet<Integer> rids = new HashSet<>();
+    for (Role r : roles)
+      rids.add(r.getId());
+    if (!rids.contains(2))
+      throw new BadRequestException("User is not an operator");
+    HashSet<Station> stations = stationRepository.findByOperator(operator);
+    if(stations.size() == 0) {
+      throw new NoDataException("No available stations for operator: "+operator);
+    }
+
+    return buildResponse(new OperatorStationsResponse(stations), format);
+
+  }
+
+  // add new station
+  @PostMapping(value="/evcharge/api/Operator/StationAdd")
+  @PreAuthorize("hasRole('OPERATOR')")
+  public ResponseEntity<String> addStation(Authentication auth,
+  @RequestParam(value = "format", defaultValue = "json") String format,
+  @RequestParam(value = "id", defaultValue = "") String id,
+  @RequestParam(value = "cost", defaultValue = "") String costString,
+  @RequestParam(value = "address", defaultValue = "") String address,
+  @RequestParam(value = "country", defaultValue = "") String country,
+  @RequestParam(value = "lon", defaultValue = "") String lonString,
+  @RequestParam(value = "lat", defaultValue = "") String latString,
+  @RequestParam(value = "points", defaultValue = "[]") List<String> pointsString) throws BadRequestException {
+  // list of pointsString is like: ["404_7.0_ac_type2", "101396_7.0_ac_type2"]
+  // so in postman value is: 404_7.0_ac_type2, 101396_7.0_ac_type2
+
+    // check validity of given parameters
+    if (id.equals(""))
+      throw new BadRequestException("Non-empty ID field of station has to be given");
+    double cost;
+    try {
+      cost = Double.valueOf(costString);
+    }
+    catch (Exception e) {
+      throw new BadRequestException("Invalid cost value given");
+    }
+    if (address.equals(""))
+      throw new BadRequestException("Non-empty address field of station has to be given");
+    if (country.equals(""))
+      throw new BadRequestException("Non-empty country field of station has to be given");
+    float lon, lat;
+    try {
+      lon = Float.valueOf(lonString);
+      lat = Float.valueOf(latString);
+    }
+    catch (Exception e) {
+      throw new BadRequestException("Invalid coordinates given");
+    }
+    if(lat > 90 || lat < -90 || lon > 180 || lon < -180)
+      throw new BadRequestException("Invalid coordinates given");
+    if (pointsString.isEmpty())
+      throw new BadRequestException("Non-empty list of points for the station has to be given");
+
+    // check if station ID already exists
+    if (stationRepository.findById(id).isPresent())
+      return buildResponse(new MessageResponse("Station with same ID already exists. If you want to update it, remove it first.",
+                                               "status"), format);
+    // create new station
+    Station station = new Station();
+    station.setId(id);
+    station.setOperator(auth.getName());
+    station.setCost(cost);
+    SpatialCoordinates coords = new SpatialCoordinates();
+    coords.setType("Point");
+    coords.setCoordinates(new float[]{lon, lat});
+    Location location = new Location();
+    location.setAddress(address);
+    location.setCountry(country);
+    location.setGeo(coords);
+    station.setLocation(location);
+    Set<Point> points = new HashSet<Point>();
+    for (String s : pointsString) {
+      String[] arrOfStr = s.split("_");
+      if (arrOfStr.length != 4)
+        throw new BadRequestException("All points have to be given in form <id>_<power>_<currentType>_<port>");
+      Point p = new Point();
+      int localId;
+      try {
+        localId = Integer.valueOf(arrOfStr[0]);
+      }
+      catch (Exception e) {
+        throw new BadRequestException("Invalid ID given at one of the station's points");
+      }
+      double power;
+      try {
+        power = Double.valueOf(arrOfStr[1]);
+      }
+      catch (Exception e) {
+        throw new BadRequestException("Invalid power value given at one of the station's points");
+      }
+      p.setLocalId(localId);
+      p.setPower(power);
+      p.setType(arrOfStr[2]);
+      p.setPort(arrOfStr[3]);
+      points.add(p);
+    }
+    station.setPoints(points);
+    try {
+      stationRepository.save(station);
+    }
+    catch (Exception e) {
+      return buildResponse(new MessageResponse("Failed to add station", "status"), format);
+    }
+
+    return buildResponse(new MessageResponse("Station added successfully!", "status"), format);
+  }
+
+  // delete station
+  @PostMapping(value="/evcharge/api/Operator/StationRemove/{stationId}")
+  @PreAuthorize("hasRole('OPERATOR') or hasRole('ADMIN')")
+  public ResponseEntity<String> removeStation(Authentication auth,
+  @RequestParam(value = "format", defaultValue = "json") String format,
+  @PathVariable(value = "stationId") String stationId) throws BadRequestException {
+
+    Station station = stationRepository.findById(stationId).orElseThrow(() -> new BadRequestException("No such station"));
+    Station stationGet = stationRepository.findById(stationId).get();
+    // admin can delete every station, but an operator only stations he/she owns
+    User user = userRepository.findByUsername(auth.getName()).get();
+    Set<Role> roles = user.getRoles();
+    HashSet<Integer> rids = new HashSet<>();
+    for (Role r : roles)
+      rids.add(r.getId());
+    if (!rids.contains(3))
+      if (!auth.getName().equals(stationGet.getOperator()))
+        return buildResponse(new MessageResponse("You cannot delete station of other operator", "status"), format);
+    // delete station
+    try {
+      stationRepository.delete(stationGet);
+    }
+    catch (Exception e) {
+      return buildResponse(new MessageResponse("Failed to delete station", "status"), format);
+    }
+    return buildResponse(new MessageResponse("Station deleted successfully!", "status"), format);
+  }
+
+
+  // vehicles per user (found through charging events)
+  @GetMapping("/evcharge/api/evPerUser/{username}")
+  @PreAuthorize("hasRole('USER') or hasRole('OPERATOR') or hasRole('ADMIN')")
+  public ResponseEntity<String> userVehicles(
+  @PathVariable(value = "username") String username,
+  @RequestParam(value = "format", defaultValue = "json") String format) throws BadRequestException, NoDataException {
+
+    User user = userRepository.findById(username).orElseThrow(() -> new BadRequestException("No such user"));
+    List<ChargeEvent> userEvents = chargeEventsRepository.findByUser(username);
+    if (userEvents.isEmpty())
+      throw new NoDataException("This user has no vehicles");
+    List<Vehicle> vehicles = new ArrayList<Vehicle>();
+    List<String> vehiclesIds = new ArrayList<String>();
+    for (ChargeEvent ce : userEvents)
+      if (!vehiclesIds.contains(ce.getVehicleId())) {
+        vehicles.add(vehicleRepository.findById(ce.getVehicleId()).get());
+        vehiclesIds.add(ce.getVehicleId());
+      }
+    return buildResponse(new UserVehiclesResponse(vehicles), format);
   }
 
 }
